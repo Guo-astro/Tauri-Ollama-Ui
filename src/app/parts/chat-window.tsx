@@ -1,13 +1,8 @@
+// src/app/parts/chat-window.tsx
+
 import { ChatHeader } from "./chat-header";
 import { Input } from "@/components/ui/input";
-import {
-  JSXElementConstructor,
-  Key,
-  ReactElement,
-  ReactNode,
-  useCallback,
-  useState,
-} from "react";
+import { useCallback, useState } from "react";
 import {
   actions,
   generateIdNumber,
@@ -38,117 +33,142 @@ import {
 
 export const ChatWindow = () => {
   const dispatch = useDispatch();
-  const focused_conv_id = useSelector(
+
+  const focusedConvId = useSelector(
     (state: RootState) => state.conversations.focusedConvId
   );
-  const messages = useSelector(
+  const focusedMessages = useSelector(
     (state: RootState) => state.conversations.focusedConvData
   );
-  const conversation_meta = useSelector(
+  const focusedConvMeta = useSelector(
     (state: RootState) => state.conversations.focusedConvMeta
   );
-  const available_models = useSelector(
+  const availableModels = useSelector(
     (state: RootState) => state.conversations.availableModels
   );
-  const last_used_model = useSelector(
+  const lastUsedModel = useSelector(
     (state: RootState) => state.conversations.lastUsedModel
   );
 
-  const [msg, setMsg] = useState("");
-  const [loading, setLoading] = useState(false);
+  const [userInput, setUserInput] = useState("");
+  const [isLoading, setIsLoading] = useState(false);
 
-  const messagesList = useCallback(() => {
-    return messages;
-  }, [messages, focused_conv_id]);
+  /**
+   * Returns the current array of focused messages.
+   */
+  const getMessagesList = useCallback(() => {
+    return focusedMessages;
+  }, [focusedMessages, focusedConvId]);
 
-  const changeModel = (model_name: string) => {
-    dispatch(setLastUsedModel(model_name));
-    if (conversation_meta) {
-      dispatch(setFocusedConvMeta({ ...conversation_meta, model: model_name }));
+  /**
+   * Changes the currently selected model in both Redux and local state.
+   */
+  const handleModelChange = (modelName: string) => {
+    dispatch(setLastUsedModel(modelName));
+    if (focusedConvMeta) {
+      dispatch(setFocusedConvMeta({ ...focusedConvMeta, model: modelName }));
     }
   };
 
-  const sendPromptMessage = useCallback(async () => {
-    setLoading(true);
+  /**
+   * Handles sending the user's message (prompt) to the AI model,
+   * creating a new conversation if necessary.
+   */
+  const handleSendMessage = useCallback(async () => {
+    if (!userInput.trim()) return;
+    setIsLoading(true);
 
-    let conversationId = focused_conv_id;
+    let currentConversationId = focusedConvId;
 
-    // Check if we need to create a new conversation first
-    if (!conversationId) {
-      const v: ConversationMeta = {
+    // 1) If no conversation is currently focused, create a brand new one.
+    if (!currentConversationId) {
+      const newConversation: ConversationMeta = {
         id: generateRandomId(12),
         created_at: dayjs().toISOString(),
-        model: last_used_model,
+        model: lastUsedModel || "mistral",
         title: "Conversation " + generateIdNumber(2),
       };
+      await actions.createConversation(newConversation);
 
-      await actions.createConversation(v);
-      dispatch(addConversation(v));
-      dispatch(setFocusedConvId(v.id));
-      dispatch(setFocusedConvMeta(v));
+      dispatch(addConversation(newConversation));
+      dispatch(setFocusedConvId(newConversation.id));
+      dispatch(setFocusedConvMeta(newConversation));
       dispatch(setFocusedConvData([]));
 
-      conversationId = v.id;
+      currentConversationId = newConversation.id;
     }
 
-    const m = msg;
-    setMsg("");
-
-    const v1: ConversationMessage = {
+    // 2) Build a user message object.
+    const userMessage: ConversationMessage = {
       id: generateRandomId(12),
-      conversation_id: conversationId,
-      message: m,
+      conversation_id: currentConversationId,
+      message: userInput,
       created_at: dayjs().toISOString(),
       ai_replied: false,
-      ctx: "",
+      // user messages won't have a context array to store, so we store "[]"
+      ctx: "[]",
     };
 
-    // Save the prompt in the database
-    await actions.sendPrompt(v1);
+    // 3) Insert the user message in the DB and Redux state.
+    await actions.sendPrompt(userMessage);
+    dispatch(setFocusedConvData([...focusedMessages, userMessage]));
 
-    // Update local state with new message
-    dispatch(setFocusedConvData([...messages, v1]));
+    // Clear user input.
+    setUserInput("");
 
-    let lastCtx: any[] = [];
-    if (messages.length > 1) {
-      lastCtx = JSON.parse((messages[1].ctx as string) || "[]");
+    // 4) Update conversation title if it’s the *very first* message.
+    if (focusedMessages.length === 0 && focusedConvMeta) {
+      const shortTitle = userInput.slice(0, 20);
+      dispatch(setFocusedConvMeta({ ...focusedConvMeta, title: shortTitle }));
+      actions.updateConversationName(shortTitle, focusedConvMeta.id);
     }
 
-    if (messages.length === 0 && conversation_meta) {
-      const x = m.slice(0, 20);
-      dispatch(setFocusedConvMeta({ ...conversation_meta, title: x }));
-      actions.updateConversationName(x, conversation_meta.id);
+    // 5) Prepare last context from the second message, if available.
+    let lastContext: number[] = [];
+    if (focusedMessages.length > 1 && focusedMessages[1]?.ctx) {
+      try {
+        lastContext = JSON.parse(focusedMessages[1].ctx) || [];
+      } catch (err) {
+        lastContext = [];
+      }
     }
 
-    // Send prompt to the AI
-    const res = await sendPrompt({
-      model: conversation_meta?.model || "mistral",
-      prompt: m,
-      context: lastCtx,
-    });
+    // 6) Send the user’s prompt to the AI.
+    let aiResponse;
+    try {
+      aiResponse = await sendPrompt({
+        model: focusedConvMeta?.model || "mistral",
+        prompt: userInput,
+        context: lastContext,
+      });
+    } catch (error) {
+      console.error("AI request failed:", error);
+      setIsLoading(false);
+      return;
+    }
 
-    const v2: ConversationMessage = {
-      ai_replied: true,
-      conversation_id: conversationId,
-      created_at: dayjs().toISOString(),
+    // 7) Build an AI message object.
+    const aiMessage: ConversationMessage = {
       id: generateRandomId(12),
-      message: res.response,
-      ctx: res.context,
+      conversation_id: currentConversationId,
+      message: aiResponse.response,
+      created_at: dayjs().toISOString(),
+      ai_replied: true,
+      // store the AI's context array as JSON
+      ctx: JSON.stringify(aiResponse.context ?? []),
     };
 
-    // Save the AI response in the database
-    await actions.sendPrompt(v2);
+    // 8) Insert the AI response message in the DB and Redux state.
+    await actions.sendPrompt(aiMessage);
+    dispatch(setFocusedConvData([...focusedMessages, userMessage, aiMessage]));
 
-    // Update local state with AI response
-    dispatch(setFocusedConvData([...messages, v1, v2]));
-
-    setLoading(false);
+    setIsLoading(false);
   }, [
-    msg,
-    messages,
-    focused_conv_id,
-    last_used_model,
-    conversation_meta,
+    userInput,
+    focusedMessages,
+    focusedConvId,
+    focusedConvMeta,
+    lastUsedModel,
     dispatch,
   ]);
 
@@ -159,66 +179,55 @@ export const ChatWindow = () => {
         style={{ height: "calc(100% - 50px)" }}
         className="w-full bg-neutral-100 flex flex-col"
       >
+        {/* MESSAGES LIST */}
         <div className="overflow-y-scroll flex flex-1 flex-col pt-4">
-          {messages.length === 0 && (
+          {/* Prompt the user to select a model if there are no messages yet */}
+          {focusedMessages.length === 0 && (
             <div className="flex-row flex py-1 items-center pl-4">
-              <p className="mr-2 text-sm">Select model: </p>
+              <p className="mr-2 text-sm">Select model:</p>
               <Select
-                value={last_used_model}
-                onValueChange={(v) => changeModel(v)}
+                value={lastUsedModel}
+                onValueChange={(value) => handleModelChange(value)}
               >
                 <SelectTrigger className="w-[180px] h-[30px] bg-white">
                   <SelectValue placeholder="Model" />
                 </SelectTrigger>
                 <SelectContent>
-                  {available_models.map(
-                    (
-                      item: {
-                        name:
-                          | string
-                          | number
-                          | boolean
-                          | ReactElement<
-                              any,
-                              string | JSXElementConstructor<any>
-                            >
-                          | Iterable<ReactNode>
-                          | null
-                          | undefined;
-                      },
-                      index: Key | null | undefined
-                    ) => (
-                      <SelectItem key={index} value={item.name}>
-                        {item.name}
-                      </SelectItem>
-                    )
-                  )}
+                  {availableModels.map((modelItem, index) => (
+                    <SelectItem key={index} value={modelItem.name}>
+                      {modelItem.name}
+                    </SelectItem>
+                  ))}
                 </SelectContent>
               </Select>
             </div>
           )}
-          {(messagesList() || []).map((item) => (
-            <ChatMessage {...item} key={item.id} />
+
+          {/* Render the conversation messages */}
+          {(getMessagesList() || []).map((messageItem) => (
+            <ChatMessage {...messageItem} key={messageItem.id} />
           ))}
         </div>
+
+        {/* USER INPUT */}
         <div className="flex flex-row p-4 pt-0">
           <Input
-            disabled={loading}
+            disabled={isLoading}
             className="bg-white rounded-full"
             placeholder="Type your prompt"
-            onChange={(x) => setMsg(x.target.value)}
-            value={msg}
-            onKeyDown={(x) => {
-              if (x.code === "Enter") {
-                sendPromptMessage();
+            onChange={(e) => setUserInput(e.target.value)}
+            value={userInput}
+            onKeyDown={(e) => {
+              if (e.code === "Enter") {
+                handleSendMessage();
               }
             }}
           />
           <Button
             size="sm"
             className="ml-2 rounded-full text-sm h-full px-4"
-            disabled={loading || msg === ""}
-            onClick={sendPromptMessage}
+            disabled={isLoading || userInput.trim() === ""}
+            onClick={handleSendMessage}
           >
             Send
           </Button>

@@ -36,7 +36,7 @@ interface SendPrompProps {
   id: string;
   conversation_id: string;
   message: string;
-  created_at: Date;
+  created_at: string;
   ai_replied: boolean;
   ctx: string;
 }
